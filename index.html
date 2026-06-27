@@ -3,187 +3,277 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>AstroCam Stacker Web</title>
+    <title>AstroCam PEGASUS Stacker</title>
     <style>
-        body { margin: 0; background: #000; color: #fff; font-family: -apple-system, sans-serif; overflow: hidden; display: flex; flex-direction: column; align-items: center; }
-        #camera-container { position: relative; width: 100vw; height: 70vh; background: #111; display: flex; justify-content: center; align-items: center; }
+        body { margin: 0; background: #050505; color: #fff; font-family: -apple-system, sans-serif; overflow: hidden; display: flex; flex-direction: column; }
+        
+        #viewfinder {
+            position: relative;
+            width: 100vw;
+            height: 65vh;
+            background: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+        }
+
+        /* O vídeo ao vivo. Ele será escondido após a captura para mostrar o resultado */
         video { width: 100%; height: 100%; object-fit: cover; }
         
-        /* Canvas de processamento fica escondido, mostramos apenas o vídeo ao vivo */
-        #process-canvas { display: none; }
+        /* O canvas que mostrará o crop 500x500 empilhado final */
+        #result-canvas { display: none; width: 100%; height: 100%; object-fit: contain; background: #111; }
         
-        .crosshair { position: absolute; width: 60px; height: 60px; pointer-events: none; border: 1px solid rgba(255,255,255,0.3); border-radius: 50%; }
-        .crosshair::before, .crosshair::after { content: ''; position: absolute; background: rgba(0, 255, 204, 0.8); }
-        .crosshair::before { top: 29px; left: -10px; width: 80px; height: 1px; }
-        .crosshair::after { top: -10px; left: 29px; width: 1px; height: 80px; }
+        /* Canvas de extração offscreen (nunca aparece na tela) */
+        #extract-canvas { display: none; }
 
-        #controls { width: 100%; padding: 20px; box-sizing: border-box; background: #121212; display: flex; flex-direction: column; gap: 15px; height: 30vh; }
+        .crosshair { position: absolute; width: 80px; height: 80px; border: 1px solid rgba(255,255,255,0.2); border-radius: 50%; pointer-events: none; }
+        .crosshair::before, .crosshair::after { content: ''; position: absolute; background: rgba(0, 255, 204, 0.6); }
+        .crosshair::before { top: 39px; left: -10px; width: 100px; height: 2px; }
+        .crosshair::after { top: -10px; left: 39px; width: 2px; height: 100px; }
+
+        #panel { padding: 20px; background: #121212; flex-grow: 1; display: flex; flex-direction: column; gap: 15px; border-top: 1px solid #333; }
         
-        #capture-btn { background: #00ffcc; color: #000; border: none; padding: 18px; font-size: 16px; font-weight: bold; cursor: pointer; text-transform: uppercase; border-radius: 8px; }
+        #log { font-family: monospace; font-size: 13px; color: #00ffcc; background: #1a1a1a; padding: 10px; border-radius: 6px; height: 60px; overflow-y: auto; }
+        
+        #capture-btn { background: #fff; color: #000; border: none; padding: 18px; font-size: 16px; font-weight: bold; border-radius: 8px; cursor: pointer; text-transform: uppercase; }
         #capture-btn:disabled { background: #333; color: #666; }
         
-        #status { font-size: 12px; font-family: monospace; color: #00ffcc; text-align: center; min-height: 15px; }
-        
-        #debug { background: #330000; color: #ff6666; padding: 10px; font-size: 11px; display: none; width: 100%; box-sizing: border-box; word-wrap: break-word; font-family: monospace; }
+        #download-btn { display: none; background: #00ffcc; color: #000; border: none; padding: 18px; font-size: 16px; font-weight: bold; border-radius: 8px; cursor: pointer; margin-top: 10px; }
     </style>
 </head>
 <body>
 
-    <div id="debug"></div>
-
-    <div id="camera-container">
+    <div id="viewfinder">
         <video id="video" autoplay playsinline></video>
-        <canvas id="process-canvas"></canvas>
-        <div class="crosshair"></div>
+        <canvas id="result-canvas"></canvas>
+        <div class="crosshair" id="mira"></div>
     </div>
 
-    <div id="controls">
-        <div id="status">Aguardando câmera...</div>
-        <button id="capture-btn">Capturar (Empilhar 20 Frames)</button>
+    <canvas id="extract-canvas"></canvas>
+
+    <div id="panel">
+        <div id="log">Aguardando inicialização...</div>
+        <button id="capture-btn">Capturar (100 Frames)</button>
+        <button id="download-btn">Salvar Empilhamento Final</button>
     </div>
 
     <script>
-        const video = document.getElementById('video');
-        const canvas = document.getElementById('process-canvas');
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        const captureBtn = document.getElementById('capture-btn');
-        const statusTxt = document.getElementById('status');
-        const debug = document.getElementById('debug');
+        const AstroCam = {
+            stream: null,
+            track: null,
+            video: document.getElementById("video"),
+            extractCanvas: document.getElementById("extract-canvas"),
+            resultCanvas: document.getElementById("result-canvas"),
+            ctx: null,
+            width: 0,
+            height: 0,
+            frames: [], // Aqui guardaremos os patches de 500x500
+            NUM_FRAMES: 100,
+            ROI_SIZE: 500,
+            logEl: document.getElementById("log"),
+            btn: document.getElementById("capture-btn"),
+            downBtn: document.getElementById("download-btn"),
+            mira: document.getElementById("mira")
+        };
 
-        const NUM_FRAMES = 20;
-        let stream;
+        AstroCam.ctx = AstroCam.extractCanvas.getContext("2d", { willReadFrequently: true });
 
-        function logInfo(msg, isError = false) {
-            if (isError) {
-                debug.style.display = 'block';
-                debug.innerText += "\n[ERRO] " + msg;
-            }
-            statusTxt.innerText = msg;
+        function log(msg) {
+            AstroCam.logEl.innerText = msg;
+            console.log(msg);
         }
 
-        async function initCamera() {
+        async function startCamera() {
             try {
-                stream = await navigator.mediaDevices.getUserMedia({
+                AstroCam.stream = await navigator.mediaDevices.getUserMedia({
                     video: { facingMode: "environment", width: { ideal: 4096 }, height: { ideal: 2160 } },
                     audio: false
                 });
-                
-                video.srcObject = stream;
-                
-                video.onloadedmetadata = () => {
-                    const settings = stream.getVideoTracks()[0].getSettings();
-                    // Logamos a resolução real que a Apple nos entregou
-                    logInfo(`Câmera Ativa: ${settings.width}x${settings.height}`);
-                    canvas.width = settings.width;
-                    canvas.height = settings.height;
-                };
 
-            } catch (err) {
-                logInfo(err.name + ": " + err.message, true);
+                AstroCam.track = AstroCam.stream.getVideoTracks()[0];
+                AstroCam.video.srcObject = AstroCam.stream;
+
+                AstroCam.video.onloadedmetadata = () => {
+                    const settings = AstroCam.track.getSettings();
+                    AstroCam.width = settings.width || AstroCam.video.videoWidth;
+                    AstroCam.height = settings.height || AstroCam.video.videoHeight;
+                    
+                    AstroCam.extractCanvas.width = AstroCam.width;
+                    AstroCam.extractCanvas.height = AstroCam.height;
+                    
+                    log(`Sensor ativo: ${AstroCam.width}x${AstroCam.height}`);
+                };
+            } catch (e) {
+                log("Erro na câmera: " + e.message);
             }
         }
 
-        // Função para achar o centro de luz (A Lua) no frame
-        function findLightCenter(context, width, height) {
-            const imgData = context.getImageData(0, 0, width, height).data;
-            let sumX = 0, sumY = 0, count = 0;
+        // Procura a lua de forma sub-amostrada para não travar o loop de captura
+        function detectMoon() {
+            AstroCam.ctx.drawImage(AstroCam.video, 0, 0, AstroCam.width, AstroCam.height);
+            const frame = AstroCam.ctx.getImageData(0, 0, AstroCam.width, AstroCam.height);
+            const data = frame.data;
+            const w = frame.width;
+            const h = frame.height;
             
-            // Pula de 4 em 4 pixels para processar rápido no celular
-            for (let y = 0; y < height; y += 4) {
-                for (let x = 0; x < width; x += 4) {
-                    const i = (y * width + x) * 4;
-                    // Calcula brilho (Luminância simplificada)
-                    const brightness = (imgData[i] + imgData[i+1] + imgData[i+2]) / 3;
-                    
-                    // Se for muito brilhante (parte da lua), usamos como âncora
-                    if (brightness > 200) {
-                        sumX += x;
-                        sumY += y;
-                        count++;
+            let max = 0, maxX = w / 2, maxY = h / 2;
+
+            // Pula de 8 em 8 para ser rápido
+            for(let y = 0; y < h; y += 8){
+                for(let x = 0; x < w; x += 8){
+                    const i = (y * w + x) * 4;
+                    const b = data[i] + data[i+1] + data[i+2]; // Soma simples de brilho
+                    if(b > max){
+                        max = b;
+                        maxX = x;
+                        maxY = y;
                     }
                 }
             }
+
+            // Calcula o ROI respeitando os limites da imagem original
+            let rx = Math.max(0, maxX - (AstroCam.ROI_SIZE / 2));
+            let ry = Math.max(0, maxY - (AstroCam.ROI_SIZE / 2));
             
-            if (count === 0) return { x: width/2, y: height/2, found: false };
-            return { x: sumX / count, y: sumY / count, found: true };
+            if (rx + AstroCam.ROI_SIZE > w) rx = w - AstroCam.ROI_SIZE;
+            if (ry + AstroCam.ROI_SIZE > h) ry = h - AstroCam.ROI_SIZE;
+
+            return { x: rx, y: ry, w: AstroCam.ROI_SIZE, h: AstroCam.ROI_SIZE };
         }
 
-        async function captureAndStack() {
-            captureBtn.disabled = true;
-            
-            const frames = [];
-            const w = canvas.width;
-            const h = canvas.height;
+        // Calcula nitidez usando diferença de gradiente
+        function sharpness(imageData) {
+            const d = imageData.data;
+            const w = imageData.width;
+            const h = imageData.height;
+            let score = 0;
 
-            // 1. Fase de Captura Rápida
-            logInfo("Gravando frames...");
-            for (let i = 0; i < NUM_FRAMES; i++) {
-                // Desenha o vídeo atual num canvas offscreen
-                const tempCanvas = document.createElement('canvas');
-                tempCanvas.width = w; tempCanvas.height = h;
-                const tempCtx = tempCanvas.getContext('2d');
-                tempCtx.drawImage(video, 0, 0, w, h);
-                frames.push(tempCanvas);
-                
-                // Pequena pausa para garantir que os frames sejam um pouco diferentes
-                await new Promise(r => setTimeout(r, 50)); 
-            }
-
-            // 2. Fase de Processamento e Alinhamento
-            logInfo("Alinhando e Empilhando...");
-            
-            // Usar o primeiro frame como referência
-            ctx.clearRect(0, 0, w, h);
-            const refCtx = frames[0].getContext('2d');
-            const refCenter = findLightCenter(refCtx, w, h);
-
-            // Se não achou a lua, apenas sobrepõe normal (sem alinhamento)
-            if (!refCenter.found) {
-                logInfo("Lua não detectada. Empilhamento simples...", true);
-            }
-
-            for (let i = 0; i < NUM_FRAMES; i++) {
-                const currentFrame = frames[i];
-                ctx.save();
-                
-                // A mágica matemática do empilhamento: 
-                // Frame 1 = 100% opacidade, Frame 2 = 50%, Frame 3 = 33%...
-                // Isso tira a média perfeita de todos os pixels, eliminando o ruído.
-                ctx.globalAlpha = 1 / (i + 1); 
-
-                if (refCenter.found) {
-                    const currentCtx = currentFrame.getContext('2d');
-                    const currentCenter = findLightCenter(currentCtx, w, h);
-                    
-                    // Calcula o quanto sua mão tremeu em relação ao primeiro frame
-                    const dx = refCenter.x - currentCenter.x;
-                    const dy = refCenter.y - currentCenter.y;
-                    
-                    // Move o canvas para compensar o tremor da mão
-                    ctx.translate(dx, dy);
+            // Analisa um miolo menor para otimizar processamento
+            for(let y = 100; y < h - 100; y += 2) {
+                for(let x = 100; x < w - 100; x += 2) {
+                    const i = (y * w + x) * 4;
+                    const j = (y * w + x + 1) * 4; // pixel adjacente
+                    score += Math.abs(d[i] - d[j]);
                 }
-
-                ctx.drawImage(currentFrame, 0, 0, w, h);
-                ctx.restore();
-                
-                logInfo(`Empilhando ${i+1}/${NUM_FRAMES}`);
             }
-
-            // 3. Exportar resultado final em PNG
-            logInfo("Processamento concluído. Salvando PNG...");
-            const dataURL = canvas.toDataURL('image/png'); // Exporta em PNG (sem perdas)
-            const link = document.createElement('a');
-            link.href = dataURL;
-            link.download = `AstroStack_${Date.now()}.png`;
-            link.click();
-
-            captureBtn.disabled = false;
-            logInfo(`Pronto. Resolução Real: ${w}x${h}`);
+            return score;
         }
 
-        captureBtn.addEventListener('click', captureAndStack);
+        function createAccumulator(width, height) {
+            return {
+                width, height,
+                r: new Float32Array(width * height),
+                g: new Float32Array(width * height),
+                b: new Float32Array(width * height)
+            };
+        }
 
-        initCamera();
+        function addFrame(accumulator, image) {
+            const src = image.data;
+            const pixels = image.width * image.height;
+            for(let i = 0; i < pixels; i++) {
+                const j = i * 4;
+                accumulator.r[i] += src[j];
+                accumulator.g[i] += src[j+1];
+                accumulator.b[i] += src[j+2];
+            }
+        }
+
+        function accumulatorToImage(accumulator, numFrames) {
+            const out = new ImageData(accumulator.width, accumulator.height);
+            const dst = out.data;
+            const pixels = accumulator.width * accumulator.height;
+            for(let i = 0; i < pixels; i++) {
+                const j = i * 4;
+                dst[j]   = accumulator.r[i] / numFrames;
+                dst[j+1] = accumulator.g[i] / numFrames;
+                dst[j+2] = accumulator.b[i] / numFrames;
+                dst[j+3] = 255;
+            }
+            return out;
+        }
+
+        async function startPipeline() {
+            AstroCam.btn.disabled = true;
+            AstroCam.frames = [];
+            
+            // FASE 1: CAPTURA (CROP ON THE FLY)
+            log("1/4: Capturando frames brutos...");
+            for(let i = 0; i < AstroCam.NUM_FRAMES; i++) {
+                const roi = detectMoon();
+                // Extrai APENAS o 500x500 e joga na memória. (Evita estouro de RAM no Safari)
+                const patch = AstroCam.ctx.getImageData(roi.x, roi.y, roi.w, roi.h);
+                AstroCam.frames.push(patch);
+                
+                if (i % 10 === 0) log(`Gravando: ${i}/${AstroCam.NUM_FRAMES}`);
+                await new Promise(r => setTimeout(r, 16)); // ~60fps tempo de respiro pro navegador
+            }
+
+            // FASE 2: ANÁLISE DE NITIDEZ
+            log("2/4: Analisando distorção atmosférica...");
+            // Usando setTimeout para a interface atualizar antes do processamento pesado
+            await new Promise(r => setTimeout(r, 50)); 
+            
+            const ranked = AstroCam.frames.map(frame => {
+                return { frame, score: sharpness(frame) };
+            });
+
+            ranked.sort((a, b) => b.score - a.score); // Maior score (mais nítido) primeiro
+            
+            // FASE 3: STACKING DOS MELHORES
+            const NUM_BEST = 20;
+            log(`3/4: Empilhando os ${NUM_BEST} melhores frames...`);
+            await new Promise(r => setTimeout(r, 50));
+
+            const bestFrames = ranked.slice(0, NUM_BEST).map(r => r.frame);
+            const acc = createAccumulator(AstroCam.ROI_SIZE, AstroCam.ROI_SIZE);
+
+            for(const frame of bestFrames) {
+                addFrame(acc, frame);
+            }
+
+            // FASE 4: RENDERIZAÇÃO
+            log("4/4: Finalizando imagem...");
+            const finalImage = accumulatorToImage(acc, NUM_BEST);
+            
+            // Esconde o vídeo e mostra o Canvas de resultado
+            AstroCam.video.style.display = "none";
+            AstroCam.mira.style.display = "none";
+            AstroCam.resultCanvas.style.display = "block";
+            AstroCam.resultCanvas.width = AstroCam.ROI_SIZE;
+            AstroCam.resultCanvas.height = AstroCam.ROI_SIZE;
+            
+            const resultCtx = AstroCam.resultCanvas.getContext("2d");
+            resultCtx.putImageData(finalImage, 0, 0);
+
+            log("Empilhamento concluído com sucesso.");
+            AstroCam.downBtn.style.display = "block";
+            AstroCam.btn.innerText = "Tentar Novamente";
+            AstroCam.btn.disabled = false;
+        }
+
+        AstroCam.btn.addEventListener('click', () => {
+            if (AstroCam.video.style.display === "none") {
+                // Reset da UI para tentar de novo
+                AstroCam.video.style.display = "block";
+                AstroCam.mira.style.display = "block";
+                AstroCam.resultCanvas.style.display = "none";
+                AstroCam.downBtn.style.display = "none";
+                AstroCam.btn.innerText = "Capturar (100 Frames)";
+            } else {
+                startPipeline();
+            }
+        });
+
+        AstroCam.downBtn.addEventListener('click', () => {
+            const link = document.createElement('a');
+            link.href = AstroCam.resultCanvas.toDataURL('image/png');
+            link.download = `AstroPegasus_Stack_${Date.now()}.png`;
+            link.click();
+        });
+
+        startCamera();
     </script>
 </body>
 </html>
