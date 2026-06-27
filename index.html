@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AstroCam Web</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #000;
+            color: #fff;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        #camera-container {
+            position: relative;
+            width: 100vw;
+            height: 70vh;
+            background: #111;
+            overflow: hidden;
+        }
+
+        /* O vídeo original fica escondido, usamos o canvas para manipular os frames */
+        video {
+            display: none;
+        }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        /* Mira (Crosshair) para ajudar na estabilização manual */
+        .crosshair {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 50px;
+            height: 50px;
+            pointer-events: none;
+        }
+        .crosshair::before, .crosshair::after {
+            content: '';
+            position: absolute;
+            background: rgba(255, 0, 0, 0.7);
+        }
+        .crosshair::before { top: 24px; left: 0; width: 50px; height: 2px; }
+        .crosshair::after { top: 0; left: 24px; width: 2px; height: 50px; }
+        .crosshair .center-dot {
+            position: absolute;
+            top: 22px; left: 22px;
+            width: 6px; height: 6px;
+            background: red;
+            border-radius: 50%;
+        }
+
+        /* Controles de Interface */
+        #controls {
+            width: 100%;
+            padding: 20px;
+            box-sizing: border-box;
+            background: #1a1a1a;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .control-group {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        label {
+            font-size: 14px;
+            font-weight: bold;
+            width: 30%;
+        }
+
+        input[type=range] {
+            width: 65%;
+            accent-color: #00ffcc;
+        }
+
+        #capture-btn {
+            background-color: #fff;
+            color: #000;
+            border: none;
+            border-radius: 50px;
+            padding: 15px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            text-transform: uppercase;
+            margin-top: 10px;
+        }
+        #capture-btn:active {
+            background-color: #ccc;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="camera-container">
+        <video id="video" autoplay playsinline></video>
+        <canvas id="canvas"></canvas>
+        <div class="crosshair"><div class="center-dot"></div></div>
+    </div>
+
+    <div id="controls">
+        <div class="control-group">
+            <label for="zoom">Zoom Digital</label>
+            <input type="range" id="zoom" min="1" max="10" step="0.1" value="1">
+        </div>
+        <div class="control-group">
+            <label for="brightness">Brilho (Lua)</label>
+            <input type="range" id="brightness" min="0.1" max="2" step="0.1" value="1">
+        </div>
+        <div class="control-group">
+            <label for="contrast">Detalhes (Contraste)</label>
+            <input type="range" id="contrast" min="0.5" max="3" step="0.1" value="1">
+        </div>
+        <button id="capture-btn">Capturar Astro</button>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const captureBtn = document.getElementById('capture-btn');
+        
+        // Controles
+        const zoomCtrl = document.getElementById('zoom');
+        const brightnessCtrl = document.getElementById('brightness');
+        const contrastCtrl = document.getElementById('contrast');
+
+        // Configurações ideais para tentar forçar a lente principal traseira em alta resolução (4K se possível)
+        const constraints = {
+            video: {
+                facingMode: { exact: "environment" },
+                width: { ideal: 3840 },
+                height: { ideal: 2160 },
+                frameRate: { ideal: 30 }
+            },
+            audio: false
+        };
+
+        async function initCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                video.srcObject = stream;
+                
+                // Aplicar capacidades de hardware se o navegador suportar (limitado no iOS)
+                const track = stream.getVideoTracks()[0];
+                const capabilities = track.getCapabilities();
+                
+                // Se a API suportar foco contínuo ou manual, tentamos forçar
+                if (capabilities.focusMode) {
+                    try {
+                        await track.applyConstraints({
+                            advanced: [{ focusMode: "continuous" }]
+                        });
+                    } catch (e) { console.log("Foco manual não suportado pelo navegador."); }
+                }
+
+                video.addEventListener('play', () => {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    drawFrame();
+                });
+
+            } catch (err) {
+                alert("Erro ao acessar a câmera: " + err.message);
+                console.error(err);
+            }
+        }
+
+        function drawFrame() {
+            if (video.paused || video.ended) return;
+
+            const zoom = parseFloat(zoomCtrl.value);
+            const brightness = parseFloat(brightnessCtrl.value);
+            const contrast = parseFloat(contrastCtrl.value);
+
+            // Limpar canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Salvar estado original
+            ctx.save();
+            
+            // Aplicar Filtros (Brilho para reduzir o estouro da lua, contraste para crateras)
+            ctx.filter = `brightness(${brightness}) contrast(${contrast})`;
+
+            // Lógica de Zoom Digital Centralizado
+            const centerX = canvas.width / 2;
+            const centerY = canvas.height / 2;
+            ctx.translate(centerX, centerY);
+            ctx.scale(zoom, zoom);
+            ctx.translate(-centerX, -centerY);
+
+            // Desenhar o vídeo no canvas
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            
+            // Restaurar estado
+            ctx.restore();
+
+            // Loop
+            requestAnimationFrame(drawFrame);
+        }
+
+        // Capturar a imagem com os filtros aplicados
+        captureBtn.addEventListener('click', () => {
+            const dataURL = canvas.toDataURL('image/jpeg', 1.0); // Qualidade máxima
+            const link = document.createElement('a');
+            link.href = dataURL;
+            link.download = `astro_capture_${Date.now()}.jpg`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            // Efeito visual de flash
+            const originalBg = document.body.style.backgroundColor;
+            document.body.style.backgroundColor = '#fff';
+            setTimeout(() => { document.body.style.backgroundColor = originalBg; }, 100);
+        });
+
+        // Iniciar
+        initCamera();
+    </script>
+</body>
+</html>
