@@ -3,234 +3,186 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>AstroCam Web</title>
+    <title>AstroCam Stacker Web</title>
     <style>
-        body {
-            margin: 0;
-            background-color: #000;
-            color: #fff;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            overflow: hidden;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-        }
+        body { margin: 0; background: #000; color: #fff; font-family: -apple-system, sans-serif; overflow: hidden; display: flex; flex-direction: column; align-items: center; }
+        #camera-container { position: relative; width: 100vw; height: 70vh; background: #111; display: flex; justify-content: center; align-items: center; }
+        video { width: 100%; height: 100%; object-fit: cover; }
+        
+        /* Canvas de processamento fica escondido, mostramos apenas o vídeo ao vivo */
+        #process-canvas { display: none; }
+        
+        .crosshair { position: absolute; width: 60px; height: 60px; pointer-events: none; border: 1px solid rgba(255,255,255,0.3); border-radius: 50%; }
+        .crosshair::before, .crosshair::after { content: ''; position: absolute; background: rgba(0, 255, 204, 0.8); }
+        .crosshair::before { top: 29px; left: -10px; width: 80px; height: 1px; }
+        .crosshair::after { top: -10px; left: 29px; width: 1px; height: 80px; }
 
-        #camera-container {
-            position: relative;
-            width: 100vw;
-            height: 70vh;
-            background: #111;
-            overflow: hidden;
-        }
-
-        /* O vídeo original fica escondido, usamos o canvas para manipular os frames */
-        video {
-            display: none;
-        }
-
-        canvas {
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-        }
-
-        /* Mira (Crosshair) para ajudar na estabilização manual */
-        .crosshair {
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            width: 50px;
-            height: 50px;
-            pointer-events: none;
-        }
-        .crosshair::before, .crosshair::after {
-            content: '';
-            position: absolute;
-            background: rgba(255, 0, 0, 0.7);
-        }
-        .crosshair::before { top: 24px; left: 0; width: 50px; height: 2px; }
-        .crosshair::after { top: 0; left: 24px; width: 2px; height: 50px; }
-        .crosshair .center-dot {
-            position: absolute;
-            top: 22px; left: 22px;
-            width: 6px; height: 6px;
-            background: red;
-            border-radius: 50%;
-        }
-
-        /* Controles de Interface */
-        #controls {
-            width: 100%;
-            padding: 20px;
-            box-sizing: border-box;
-            background: #1a1a1a;
-            display: flex;
-            flex-direction: column;
-            gap: 15px;
-        }
-
-        .control-group {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
-
-        label {
-            font-size: 14px;
-            font-weight: bold;
-            width: 30%;
-        }
-
-        input[type=range] {
-            width: 65%;
-            accent-color: #00ffcc;
-        }
-
-        #capture-btn {
-            background-color: #fff;
-            color: #000;
-            border: none;
-            border-radius: 50px;
-            padding: 15px;
-            font-size: 16px;
-            font-weight: bold;
-            cursor: pointer;
-            text-transform: uppercase;
-            margin-top: 10px;
-        }
-        #capture-btn:active {
-            background-color: #ccc;
-        }
+        #controls { width: 100%; padding: 20px; box-sizing: border-box; background: #121212; display: flex; flex-direction: column; gap: 15px; height: 30vh; }
+        
+        #capture-btn { background: #00ffcc; color: #000; border: none; padding: 18px; font-size: 16px; font-weight: bold; cursor: pointer; text-transform: uppercase; border-radius: 8px; }
+        #capture-btn:disabled { background: #333; color: #666; }
+        
+        #status { font-size: 12px; font-family: monospace; color: #00ffcc; text-align: center; min-height: 15px; }
+        
+        #debug { background: #330000; color: #ff6666; padding: 10px; font-size: 11px; display: none; width: 100%; box-sizing: border-box; word-wrap: break-word; font-family: monospace; }
     </style>
 </head>
 <body>
 
+    <div id="debug"></div>
+
     <div id="camera-container">
         <video id="video" autoplay playsinline></video>
-        <canvas id="canvas"></canvas>
-        <div class="crosshair"><div class="center-dot"></div></div>
+        <canvas id="process-canvas"></canvas>
+        <div class="crosshair"></div>
     </div>
 
     <div id="controls">
-        <div class="control-group">
-            <label for="zoom">Zoom Digital</label>
-            <input type="range" id="zoom" min="1" max="10" step="0.1" value="1">
-        </div>
-        <div class="control-group">
-            <label for="brightness">Brilho (Lua)</label>
-            <input type="range" id="brightness" min="0.1" max="2" step="0.1" value="1">
-        </div>
-        <div class="control-group">
-            <label for="contrast">Detalhes (Contraste)</label>
-            <input type="range" id="contrast" min="0.5" max="3" step="0.1" value="1">
-        </div>
-        <button id="capture-btn">Capturar Astro</button>
+        <div id="status">Aguardando câmera...</div>
+        <button id="capture-btn">Capturar (Empilhar 20 Frames)</button>
     </div>
 
     <script>
         const video = document.getElementById('video');
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
+        const canvas = document.getElementById('process-canvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
         const captureBtn = document.getElementById('capture-btn');
-        
-        // Controles
-        const zoomCtrl = document.getElementById('zoom');
-        const brightnessCtrl = document.getElementById('brightness');
-        const contrastCtrl = document.getElementById('contrast');
+        const statusTxt = document.getElementById('status');
+        const debug = document.getElementById('debug');
 
-        // Configurações ideais para tentar forçar a lente principal traseira em alta resolução (4K se possível)
-        const constraints = {
-            video: {
-                facingMode: { exact: "environment" },
-                width: { ideal: 3840 },
-                height: { ideal: 2160 },
-                frameRate: { ideal: 30 }
-            },
-            audio: false
-        };
+        const NUM_FRAMES = 20;
+        let stream;
+
+        function logInfo(msg, isError = false) {
+            if (isError) {
+                debug.style.display = 'block';
+                debug.innerText += "\n[ERRO] " + msg;
+            }
+            statusTxt.innerText = msg;
+        }
 
         async function initCamera() {
             try {
-                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: "environment", width: { ideal: 4096 }, height: { ideal: 2160 } },
+                    audio: false
+                });
+                
                 video.srcObject = stream;
                 
-                // Aplicar capacidades de hardware se o navegador suportar (limitado no iOS)
-                const track = stream.getVideoTracks()[0];
-                const capabilities = track.getCapabilities();
-                
-                // Se a API suportar foco contínuo ou manual, tentamos forçar
-                if (capabilities.focusMode) {
-                    try {
-                        await track.applyConstraints({
-                            advanced: [{ focusMode: "continuous" }]
-                        });
-                    } catch (e) { console.log("Foco manual não suportado pelo navegador."); }
-                }
-
-                video.addEventListener('play', () => {
-                    canvas.width = video.videoWidth;
-                    canvas.height = video.videoHeight;
-                    drawFrame();
-                });
+                video.onloadedmetadata = () => {
+                    const settings = stream.getVideoTracks()[0].getSettings();
+                    // Logamos a resolução real que a Apple nos entregou
+                    logInfo(`Câmera Ativa: ${settings.width}x${settings.height}`);
+                    canvas.width = settings.width;
+                    canvas.height = settings.height;
+                };
 
             } catch (err) {
-                alert("Erro ao acessar a câmera: " + err.message);
-                console.error(err);
+                logInfo(err.name + ": " + err.message, true);
             }
         }
 
-        function drawFrame() {
-            if (video.paused || video.ended) return;
-
-            const zoom = parseFloat(zoomCtrl.value);
-            const brightness = parseFloat(brightnessCtrl.value);
-            const contrast = parseFloat(contrastCtrl.value);
-
-            // Limpar canvas
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // Função para achar o centro de luz (A Lua) no frame
+        function findLightCenter(context, width, height) {
+            const imgData = context.getImageData(0, 0, width, height).data;
+            let sumX = 0, sumY = 0, count = 0;
             
-            // Salvar estado original
-            ctx.save();
+            // Pula de 4 em 4 pixels para processar rápido no celular
+            for (let y = 0; y < height; y += 4) {
+                for (let x = 0; x < width; x += 4) {
+                    const i = (y * width + x) * 4;
+                    // Calcula brilho (Luminância simplificada)
+                    const brightness = (imgData[i] + imgData[i+1] + imgData[i+2]) / 3;
+                    
+                    // Se for muito brilhante (parte da lua), usamos como âncora
+                    if (brightness > 200) {
+                        sumX += x;
+                        sumY += y;
+                        count++;
+                    }
+                }
+            }
             
-            // Aplicar Filtros (Brilho para reduzir o estouro da lua, contraste para crateras)
-            ctx.filter = `brightness(${brightness}) contrast(${contrast})`;
-
-            // Lógica de Zoom Digital Centralizado
-            const centerX = canvas.width / 2;
-            const centerY = canvas.height / 2;
-            ctx.translate(centerX, centerY);
-            ctx.scale(zoom, zoom);
-            ctx.translate(-centerX, -centerY);
-
-            // Desenhar o vídeo no canvas
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            
-            // Restaurar estado
-            ctx.restore();
-
-            // Loop
-            requestAnimationFrame(drawFrame);
+            if (count === 0) return { x: width/2, y: height/2, found: false };
+            return { x: sumX / count, y: sumY / count, found: true };
         }
 
-        // Capturar a imagem com os filtros aplicados
-        captureBtn.addEventListener('click', () => {
-            const dataURL = canvas.toDataURL('image/jpeg', 1.0); // Qualidade máxima
+        async function captureAndStack() {
+            captureBtn.disabled = true;
+            
+            const frames = [];
+            const w = canvas.width;
+            const h = canvas.height;
+
+            // 1. Fase de Captura Rápida
+            logInfo("Gravando frames...");
+            for (let i = 0; i < NUM_FRAMES; i++) {
+                // Desenha o vídeo atual num canvas offscreen
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = w; tempCanvas.height = h;
+                const tempCtx = tempCanvas.getContext('2d');
+                tempCtx.drawImage(video, 0, 0, w, h);
+                frames.push(tempCanvas);
+                
+                // Pequena pausa para garantir que os frames sejam um pouco diferentes
+                await new Promise(r => setTimeout(r, 50)); 
+            }
+
+            // 2. Fase de Processamento e Alinhamento
+            logInfo("Alinhando e Empilhando...");
+            
+            // Usar o primeiro frame como referência
+            ctx.clearRect(0, 0, w, h);
+            const refCtx = frames[0].getContext('2d');
+            const refCenter = findLightCenter(refCtx, w, h);
+
+            // Se não achou a lua, apenas sobrepõe normal (sem alinhamento)
+            if (!refCenter.found) {
+                logInfo("Lua não detectada. Empilhamento simples...", true);
+            }
+
+            for (let i = 0; i < NUM_FRAMES; i++) {
+                const currentFrame = frames[i];
+                ctx.save();
+                
+                // A mágica matemática do empilhamento: 
+                // Frame 1 = 100% opacidade, Frame 2 = 50%, Frame 3 = 33%...
+                // Isso tira a média perfeita de todos os pixels, eliminando o ruído.
+                ctx.globalAlpha = 1 / (i + 1); 
+
+                if (refCenter.found) {
+                    const currentCtx = currentFrame.getContext('2d');
+                    const currentCenter = findLightCenter(currentCtx, w, h);
+                    
+                    // Calcula o quanto sua mão tremeu em relação ao primeiro frame
+                    const dx = refCenter.x - currentCenter.x;
+                    const dy = refCenter.y - currentCenter.y;
+                    
+                    // Move o canvas para compensar o tremor da mão
+                    ctx.translate(dx, dy);
+                }
+
+                ctx.drawImage(currentFrame, 0, 0, w, h);
+                ctx.restore();
+                
+                logInfo(`Empilhando ${i+1}/${NUM_FRAMES}`);
+            }
+
+            // 3. Exportar resultado final em PNG
+            logInfo("Processamento concluído. Salvando PNG...");
+            const dataURL = canvas.toDataURL('image/png'); // Exporta em PNG (sem perdas)
             const link = document.createElement('a');
             link.href = dataURL;
-            link.download = `astro_capture_${Date.now()}.jpg`;
-            document.body.appendChild(link);
+            link.download = `AstroStack_${Date.now()}.png`;
             link.click();
-            document.body.removeChild(link);
-            
-            // Efeito visual de flash
-            const originalBg = document.body.style.backgroundColor;
-            document.body.style.backgroundColor = '#fff';
-            setTimeout(() => { document.body.style.backgroundColor = originalBg; }, 100);
-        });
 
-        // Iniciar
+            captureBtn.disabled = false;
+            logInfo(`Pronto. Resolução Real: ${w}x${h}`);
+        }
+
+        captureBtn.addEventListener('click', captureAndStack);
+
         initCamera();
     </script>
 </body>
